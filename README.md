@@ -8,6 +8,8 @@
   - https://www.iquilezles.org/www/articles/distfunctions/distfunctions.htm
 - Live Demo: https://raykim1996.github.io/hw02-raymarching-sdfs/
 - I used various sdf models: ellipsoid, torus, capsule, cappedCone and CSG operations like smoothUnion and smoothSubtraction to create the main model. I also used ease_in_out to animate the character's head movement.
+- <img height="360" src="img/HW02-001.png">
+
 ## Objective
 - Gain experience with signed distance functions
 - Experiment with animation curves

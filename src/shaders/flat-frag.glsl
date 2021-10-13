@@ -8,9 +8,9 @@ uniform float u_Time;
 in vec2 fs_Pos;
 out vec4 out_Col;
 
-const int MAX_RAY_STEPS = 128;
+const int MAX_RAY_STEPS = 256;
 const float FOV = 45.0;
-const float EPSILON = 1e-6;
+const float EPSILON = 1e-4;
 
 const vec3 EYE = vec3(0.0, 0.0, -10.0);
 const vec3 ORIGIN = vec3(0.0, 0.0, 0.0);
@@ -19,6 +19,9 @@ const vec3 WORLD_RIGHT = vec3(1.0, 0.0, 0.0);
 const vec3 WORLD_FORWARD = vec3(0.0, 0.0, 1.0);
 const vec3 LIGHT_DIR = vec3(-1.0, -1.0, -2.0);
 const vec3 lightPos = vec3(6.0, 10.0, -10.0);
+const float SHADOW_HARDNESS = 50.0;
+
+#define BOUNDING_SPHERE 1
 
 struct Ray {
   vec3 origin;
@@ -29,7 +32,7 @@ struct Intersection {
   vec3 position;
   vec3 normal;
   float distance_t;
-  int material_id;
+  float material_id;
 };
 float dot2( in vec2 v ) { return dot(v,v); }
 float dot2( in vec3 v ) { return dot(v,v); }
@@ -76,6 +79,30 @@ vec3 rotateY(vec3 p, float a)
 vec3 rotateZ(vec3 p, float a)
 {
     return vec3(cos(a) * p.x - sin(a) * p.y, sin(a) * p.x + cos(a) * p.y, p.z);   
+}
+
+vec3 rotateX2(vec3 p, float a)
+{
+    float cosA = cos(a);
+    float sinA = sin(a);
+    p.yz = mat2(cosA, -sinA, sinA, cosA) * p.yz;
+    return p;
+}
+
+vec3 rotateY2(vec3 p, float a)
+{
+    float cosA = cos(a);
+    float sinA = sin(a);
+    p.xz = mat2(cosA, -sinA, sinA, cosA) * p.xz;
+    return p;
+}
+
+vec3 rotateZ2(vec3 p, float a)
+{
+    float cosA = cos(a);
+    float sinA = sin(a);
+    p.xy = mat2(cosA, -sinA, sinA, cosA) * p.xy;
+    return p;
 }
 
 vec3 bendPoint(vec3 p, float k)
@@ -172,8 +199,80 @@ vec2 sdStick( vec3 p, vec3 a, vec3 b, float r1, float r2 )
   return vec2(length( pa - ba*h ) - mix(r1, r2, h*h*(3.0 - 2.0*h)), h );
 }
 
+float sdTriPrism( vec3 p, vec2 h )
+{
+  vec3 q = abs(p);
+  return max(q.z-h.y,max(q.x*0.866025+p.y*0.5,-p.y)-h.x*0.5);
+}
+
+float sdCone( in vec3 p, in vec2 c, float h )
+{
+  // c is the sin/cos of the angle, h is height
+  // Alternatively pass q instead of (c,h),
+  // which is the point at the base in 2D
+  vec2 q = h*vec2(c.x/c.y,-1.0);
+    
+  vec2 w = vec2( length(p.xz), p.y );
+  vec2 a = w - q*clamp( dot(w,q)/dot(q,q), 0.0, 1.0 );
+  vec2 b = w - q*vec2( clamp( w.x/q.x, 0.0, 1.0 ), 1.0 );
+  float k = sign( q.y );
+  float d = min(dot( a, a ),dot(b, b));
+  float s = max( k*(w.x*q.y-w.y*q.x),k*(w.y-q.y)  );
+  return sqrt(d)*sign(s);
+}
+
+float sdEye(vec3 pos) {
+  vec3 headPos = rotateX(pos, ease_in_out_quadratic(cos(u_Time * 0.15) * 0.5));
+  vec3 center = vec3(0.0, 0.0, 0.0);
+  vec3 q = pos - center;
+  // Eye===========================================================================================
+  vec3 eyePos = rotateZ(pos - vec3(0.4, 1.5 + 1.0 * q.x * q.x, -0.6), 0.0);
+  float eye = sdTriPrism(eyePos, vec2(0.4, 0.5));
+  float eyeSphere = sdfSphere(pos, vec3(0.4, 1.5, -0.6), 0.6);
+  // eye = opSmoothIntersection(eyeSphere, eye, 0.3);
+  eye = sdfSphere(headPos, vec3(0.5, 0.3, -0.65), 0.4);
+  float eye2 = sdfSphere(headPos, vec3(-0.5, 0.3, -0.65), 0.4);
+  eye = smin(eye, eye2, 0.3);
+  return eye;
+  //===============================================================================================
+}
+
+float sdIris(vec3 pos) {
+  vec3 headPos = rotateX(pos, ease_in_out_quadratic(cos(u_Time * 0.15) * 0.5));
+  vec3 center = vec3(0.0, 0.0, 0.0);
+  vec3 q = pos - center;
+  // Eye===========================================================================================
+  vec3 irisPos = rotateZ(pos - vec3(0.4, 1.5 + 1.0 * q.x * q.x, -0.6), 0.0);
+  float iris = sdfSphere(headPos, vec3(0.5, 0.3, -0.68), 0.4);
+  // return iris;
+  float irisTorus = sdTorus(rotateY2(rotateX2(headPos - vec3(0.65, 0.4, -0.97), 1.5), 0.8), vec2(0.15, 0.12));
+  // return irisTorus;
+  iris = opSmoothIntersection(iris, irisTorus, 0.1);
+  float iris2 = sdfSphere(headPos, vec3(-0.5, 0.3, -0.68), 0.4);
+  // return iris;
+  float irisTorus2 = sdTorus(rotateY2(rotateX2(headPos - vec3(-0.65, 0.4, -0.97), 1.5), -0.8), vec2(0.15, 0.12));
+  // return irisTorus;
+  iris2 = opSmoothIntersection(iris2, irisTorus2, 0.1);
+  // float eye2 = sdfSphere(headPos, vec3(-0.5, 0.3, -0.65), 0.4);
+  // eye = smin(eye, eye2, 0.3);
+  return unionSDF(iris, iris2);
+  //===============================================================================================
+}
+
+float sdSeed(vec3 pos) {
+  float seed_torus = sdTorus(rotateX(pos, -0.8) - vec3(0.0, 0.7, 2.0), vec2(0.7, 0.7));
+  float seed_cone = sdCappedCone(rotateX(pos, -0.8) - vec3(0.0, 1.8, 2.1), 0.4, 0.6, 0.1);
+  float seed = smin(seed_torus, seed_cone, 0.3);
+  return seed;
+}
+
+float sdTeeth(vec3 pos) {
+  float tooth = sdCone(rotateX2(pos - vec3(0.5, -0.3, -1.3), 3.0), vec2(0.8, 0.8), 0.2);
+  return tooth;
+}
+
 float sdBulbasaur(vec3 pos) {
-  vec3 headPos = rotateX(pos, ease_in_out_quadratic(cos(u_Time * 0.3) * 0.5));
+  vec3 headPos = rotateX(pos, ease_in_out_quadratic(cos(u_Time * 0.15) * 0.5));
   vec3 center = vec3(0.0, 0.0, 0.0);
   vec3 q = pos - center;
   // Head==========================================================================================
@@ -184,6 +283,12 @@ float sdBulbasaur(vec3 pos) {
   float chin_torus = sdEllipsoid(rotateX(headPos, 0.5) - vec3(0.0, -0.1, -0.1), vec3(1.0, 0.4, 1.1));
   // return chin_torus;
   float head = smin(head_ellipsoid, head_torus, 0.5);
+  // EyeHole=========================================================================================
+  float eyeHole = sdfSphere(headPos, vec3(0.65, 0.4, -0.9), 0.28);
+  float eyeHole2 = sdfSphere(headPos, vec3(-0.65, 0.4, -0.9), 0.28);
+  // eyeHole = sdEllipsoid(pos - vec3(0.6, 0.4, -0.9), vec3(0.3, 0.2, 0.2));
+  head = smax(eyeHole, head, 0.1);
+  head = smax(eyeHole2, head, 0.1);
   head = smin(head, chin_torus, 0.3);
   vec3 earQ = headPos - center;
   vec3 earPos = rotateX(rotateZ(vec3(abs(earQ.x), earQ.y, earQ.z), 0.7), -0.3);
@@ -198,6 +303,7 @@ float sdBulbasaur(vec3 pos) {
   float mouthtip = sdEllipsoid(rotateX(mouthPos, -0.5) - vec3(0.0, -0.8, -0.8 + 0.8 * q.x * q.x), vec3(0.1, 0.1, 0.04));
   head = smax(mouth, head, 0.05);
   head = smin(head, mouthtip, 0.3);
+  // return head;
   //===============================================================================================
   // Body==========================================================================================
   float body_top = sdEllipsoid(rotateX(pos, 0.3) - vec3(0.0, -0.7, 0.2), vec3(1.0, 0.7, 0.8));
@@ -227,18 +333,13 @@ float sdBulbasaur(vec3 pos) {
   body = smin(body, lFoot, 0.2);
   body = smin(body, rFoot, 0.2);
   //===============================================================================================
-  // Seed==========================================================================================
-  float seed_torus = sdTorus(rotateX(pos, -0.8) - vec3(0.0, 0.7, 2.0), vec2(0.7, 0.7));
-  float seed_cone = sdCappedCone(rotateX(pos, -0.8) - vec3(0.0, 1.8, 2.1), 0.4, 0.6, 0.1);
-  // float seed_torus2 = sdTorus(rotateX(pos, -0.8) - vec3(0.0, 1.5, 2.1), vec2(0.8, 0.5));
-  // return seed_cone;
-  float seed = smin(seed_torus, seed_cone, 0.3);
-  // seed = smax(seed_torus2, seed, 0.2);
-  
-  // float seed = 
-  //===============================================================================================
+  // NoseHole
+  float noseHole1 = sdEllipsoid(rotateZ2(headPos - vec3(0.15, 0.0, -1.5), -0.5), vec3(0.02, 0.05, 0.2));
+  float noseHole2 = sdEllipsoid(rotateZ2(headPos - vec3(-0.15, 0.0, -1.5), 0.5), vec3(0.02, 0.05, 0.2));
   float total = smin(head, body, 0.2);
-  return smin(total, seed, 0.1);
+  total = subtractionSDF(noseHole2, subtractionSDF(noseHole1, total));
+  return total;
+  // return smin(total, seed, 0.1);
   // return smin(head_ellipsoid, head_torus, 0.5);
   return head;
 }
@@ -249,45 +350,112 @@ float sdPlane(vec3 p, vec4 n)
     return dot(p, n.xyz) + n.w;
 }
 
+float sdPokeballTop(vec3 pos) {
+  float top = sdfSphere(pos, vec3(0.0, 10.0 * fract(u_Time * 0.05) * (1.0 - fract(u_Time * 0.05)) - 2.0, -3.0), 0.3);
+  float topCut = sdBox(pos - vec3(0.0, 10.0 * fract(u_Time * 0.05) * (1.0 - fract(u_Time * 0.05)) - 2.275, -3.0), vec3(0.3, 0.3, 0.3));
+  top =  subtractionSDF(topCut, top);
+  return top;
+}
+
+float sdPokeballBottom(vec3 pos) {
+  float bottom = sdfSphere(pos, vec3(0.0, 10.0 * fract(u_Time * 0.05) * (1.0 - fract(u_Time * 0.05)) - 2.0, -3.0), 0.3);
+  float bottomCut = sdBox(pos - vec3(0.0, 10.0 * fract(u_Time * 0.05) * (1.0 - fract(u_Time * 0.05)) - 1.725, -3.0), vec3(0.3, 0.3, 0.3));
+  bottom = subtractionSDF(bottomCut, bottom);
+  return bottom;
+}
+
 //==============================================================================
 #define BULBASAUR_SDF sdBulbasaur(queryPos)
 #define FLOOR_SDF sdPlane(queryPos, vec4(0.0, 1.0, 0.0, 2.5))
-#define POKEBALL_SDF sdfSphere(queryPos, vec3(0.0, 20.0 * fract(u_Time * 0.1) * (1.0 - fract(u_Time * 0.1)) - 2.0, -3.0), 0.3)
-float sceneSDF(vec3 queryPos) {
-  // return sdfSphere(queryPos, vec3(0.0, 0.0, 0.0), 1.0);
-    // return smin(sdfSphere(queryPos, vec3(0.0, 0.0, 0.0), 0.2),
-    //             sdfSphere(queryPos, vec3(cos(u_Time * 0.01) * 2.0, 0.0, 0.0), abs(cos(u_Time * 0.01))), 0.2);
-    // head = smin(sdfSphere(queryPos, vec3(0.0, 0.5, 0.0), 1.0),
-    //             sdTorus(queryPos + vec3(0.0, 0.0, 0.3), vec2(0.6, 0.4)), 0.4);
-    float t = 1e+6;
-    
-    float t2;
-    
-    if ((t2 = FLOOR_SDF) < t) {
-        t = t2;
-        // obj = FLOOR;
-    }
-    if ((t2 = BULBASAUR_SDF) < t) {
-        t = t2;
-        // obj = LONG_CUBE;
-    }
-    if ((t2 = POKEBALL_SDF) < t) {
-      t = t2;
-    }
-    return t;
+#define SEED_SDF sdSeed(queryPos)
+#define POKEBALL1_SDF sdPokeballTop(queryPos)
+#define POKEBALL2_SDF sdPokeballBottom(queryPos)
+#define TOUNGUE_SDF sdEllipsoid(rotateX(queryPos, ease_in_out_quadratic(cos(u_Time * 0.15) * 0.5)) - vec3(0.0, -0.4, -0.4), vec3(0.9, 0.3, 0.7))
+#define EYE_SDF sdEye(queryPos)
+#define TEETH_SDF sdTeeth(queryPos)
+#define IRIS_SDF sdIris(queryPos)
+#define POKEBALLMID_SDF sdfSphere(queryPos, vec3(0.0, 10.0 * fract(u_Time * 0.05) * (1.0 - fract(u_Time * 0.05)) - 2.0, -3.0), 0.25)
+#define BULBASAUR_COLOR rgb(vec3(146.0, 209.0, 179.0))
+#define EYE_COLOR rgb(vec3(249.0, 249.0, 249.0))
+#define IRIS_COLOR rgb(vec3(183.0, 69.0, 85.0))
+#define SEED_COLOR rgb(vec3(73.0, 137.0, 111.0))
+#define TOUNGUE_COLOR rgb(vec3(189.0, 146.0, 175.0))
+#define POKEBALLTOP_COLOR rgb(vec3(238.0, 98.0, 98.0))
+#define POKEBALLBOTTOM_COLOR rgb(vec3(253.0, 253.0, 253.0))
+#define POKEBALLMID_COLOR rgb(vec3(0.0))
+#define FLOOR_ID 1.0
+#define BULBASAUR_ID 2.0
+#define EYE_ID 3.0
+#define IRIS_ID 4.0
+#define SEED_ID 5.0
+#define TOUNGUE_ID 6.0
+#define POKEBALL1_ID 7.0
+#define POKEBALL2_ID 8.0
+#define TEETH_ID 9.0
+#define POKEBALLMID_ID 10.0
 
-    // float bulbasaur = sdBulbasaur(queryPos);
-    // float floorPlane = queryPos.y - (-2.6);
-    // // return bulbasaur;
-    // return min(bulbasaur, floorPlane);
-
+vec2 sceneSDF(vec3 queryPos) {
+  #if BOUNDING_SPHERE
+    float bounding_sphere_dist = sdfSphere(queryPos, vec3(0.0, 0.0, 0.0), 5.0);
+    if (bounding_sphere_dist <= 0.3) {
+      #endif
+      float t = 1e+6;    
+      float t2;
+      float id;
+      
+      if ((t2 = FLOOR_SDF) < t) {
+          t = t2;
+          id = FLOOR_ID;
+      }
+      if ((t2 = BULBASAUR_SDF) < t) {
+          t = t2;
+          id = BULBASAUR_ID;
+      }
+      if ((t2 = EYE_SDF) < t) {
+        t = t2;
+        id = EYE_ID;
+      }
+      if ((t2 = SEED_SDF) < t) {
+        t = t2;
+        id = SEED_ID;
+      }
+      if ((t2 = IRIS_SDF) < t) {
+        t = t2;
+        id = IRIS_ID;
+      }
+      if ((t2 = TOUNGUE_SDF) < t) {
+        t = t2;
+        id = TOUNGUE_ID;
+      }
+      if ((t2 = POKEBALL1_SDF) < t) {
+        t = t2;
+        id = POKEBALL1_ID;
+      }
+      if ((t2 = POKEBALL2_SDF) < t) {
+        t = t2;
+        id = POKEBALL2_ID;
+      }
+      if ((t2 = POKEBALLMID_SDF) < t) {
+        t = t2;
+        id = POKEBALLMID_ID;
+      }
+      return vec2(t, id);
+  #if BOUNDING_SPHERE
+    }
+    return vec2(bounding_sphere_dist, FLOOR_ID);
+    #endif
+      // float bulbasaur = sdBulbasaur(queryPos);
+      // float floorPlane = queryPos.y - (-2.6);
+      // // return bulbasaur;
+      // return min(bulbasaur, floorPlane);
 }
 
-float shadow(vec3 rayOri, vec3 rayDir) {
+float hardShadow(vec3 rayOri, vec3 rayDir) {
     float t = 0.001;
     for(int i = 0; i < MAX_RAY_STEPS; ++i) {
-        float curr = sceneSDF(rayOri + t * rayDir);
-        if(curr < EPSILON) {
+        vec2 currVec = sceneSDF(rayOri + t * rayDir);
+        float curr = currVec[0];
+        if(curr < 0.0001) {
             return 0.0;
         }
         t += curr;
@@ -295,13 +463,60 @@ float shadow(vec3 rayOri, vec3 rayDir) {
     return 1.0;
 }
 
+float softShadow(vec3 rayOri, vec3 rayDir, float min_t, float k) {
+    float res = 1.0;
+    float t = min_t;
+    for(int i = 0; i < MAX_RAY_STEPS; ++i) {
+        vec2 currVec = sceneSDF(rayOri + t * rayDir);
+        float curr = currVec[0];
+        if(curr < 0.0001) {
+            return 0.0;
+        }
+        res = min(res, k * curr / t);
+        t += curr;
+    }
+    return res;
+}
+
 vec3 estimateNormal(vec3 p)
 {
     vec2 d = vec2(0.0, EPSILON);
-    float x = sceneSDF(p + d.yxx) - sceneSDF(p - d.yxx);
-    float y = sceneSDF(p + d.xyx) - sceneSDF(p - d.xyx);
-    float z = sceneSDF(p + d.xxy) - sceneSDF(p - d.xxy);
+    float x = sceneSDF(p + d.yxx)[0] - sceneSDF(p - d.yxx)[0];
+    float y = sceneSDF(p + d.xyx)[0] - sceneSDF(p - d.xyx)[0];
+    float z = sceneSDF(p + d.xxy)[0] - sceneSDF(p - d.xxy)[0];
     return normalize(vec3(x, y, z));
+}
+
+vec3 computeMaterial(float hitObj, vec3 p, vec3 n, vec3 lightVec)
+{
+    float diffuseTerm = dot(n, lightVec);
+    diffuseTerm = clamp(diffuseTerm, 0.f, 1.f);
+    float ambientTerm = 0.2;
+    float lightIntensity = diffuseTerm + ambientTerm;
+
+    if (hitObj == FLOOR_ID) {
+        return (rgb(vec3(146.0, 209.0, 179.0)) * lightIntensity);
+    } else if (hitObj == BULBASAUR_ID) {
+        return (BULBASAUR_COLOR) * lightIntensity;
+    } else if (hitObj == EYE_ID) {
+        return (EYE_COLOR) * lightIntensity;
+    } else if (hitObj == IRIS_ID) {
+        return (IRIS_COLOR) * lightIntensity;
+    } else if (hitObj == SEED_ID) {
+        return (SEED_COLOR) * lightIntensity;
+    } else if (hitObj == TOUNGUE_ID) {
+        return (TOUNGUE_COLOR) * lightIntensity;
+    } else if (hitObj == POKEBALL1_ID) {
+        return (POKEBALLTOP_COLOR) * lightIntensity;
+    } else if (hitObj == POKEBALL2_ID) {
+        return (POKEBALLBOTTOM_COLOR) * lightIntensity;
+    } else if (hitObj == TEETH_ID) {
+        return (POKEBALLBOTTOM_COLOR) * lightIntensity;
+    } else if (hitObj == POKEBALLMID_ID) {
+        return (POKEBALLMID_COLOR) * lightIntensity;
+    }  else {
+        return vec3(0, 0, 0) * lightIntensity;
+    }
 }
 
 Ray getRay(vec2 uv) {
@@ -335,13 +550,14 @@ Intersection getRaymarchedIntersection(vec2 uv)
 
     for (int step; step < MAX_RAY_STEPS; step++) {
         vec3 queryPoint = r.origin + r.direction * distancet;
-        float currDist = sceneSDF(queryPoint);
+        vec2 currVec = sceneSDF(queryPoint);
+        float currDist = currVec[0];
         if (currDist < EPSILON) { 
             // current ray hit something
             intersection.position = queryPoint;
             intersection.distance_t = distancet;
             intersection.normal = estimateNormal(queryPoint);
-            // intersection.material_id = mat_id;
+            intersection.material_id = currVec[1];
             return intersection;
         }
         distancet += currDist;
@@ -359,10 +575,11 @@ vec3 getSceneColor(vec2 uv)
         diffuseTerm = clamp(diffuseTerm, 0.f, 1.f);
         float ambientTerm = 0.2;
         float lightIntensity = diffuseTerm + ambientTerm;  
-        float shadow = shadow(intersection.position, normalize(lightVec));
-        vec3 color = rgb(vec3(146.0, 209.0, 179.0));
+        // float shadow = hardShadow(intersection.position, normalize(lightVec));
+        float shadow = softShadow(intersection.position, normalize(lightVec), 0.1, SHADOW_HARDNESS);
+        vec3 currColor = computeMaterial(intersection.material_id, intersection.position, intersection.normal, lightVec);
 
-        return color * lightIntensity * shadow;
+        return currColor * lightIntensity * shadow;
     }
     return rgb(vec3(136.0, 206.0, 235.0));
 }
